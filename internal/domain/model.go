@@ -37,23 +37,6 @@ type MediaTake struct {
 	AdmittedAt time.Time `json:"admitted_at"`
 }
 
-type TakeAdmissionClaim struct {
-	TakeID    string
-	Token     uint64
-	StartedAt time.Time
-}
-
-func (claim TakeAdmissionClaim) Owns(other TakeAdmissionClaim) bool {
-	return claim.TakeID != "" &&
-		claim.TakeID == other.TakeID &&
-		claim.Token != 0 &&
-		claim.Token == other.Token
-}
-
-func (claim TakeAdmissionClaim) IsZero() bool {
-	return claim.TakeID == "" || claim.Token == 0 || claim.StartedAt.IsZero()
-}
-
 type SyncPolicy struct {
 	MinConfidence float64 `json:"min_confidence"`
 	MaxOffsetMS   int     `json:"max_offset_ms"`

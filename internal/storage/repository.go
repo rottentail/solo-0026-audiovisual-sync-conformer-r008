@@ -7,18 +7,14 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/rottentail/solo-0026-audiovisual-sync-conformer/internal/domain"
 )
 
 type Repository struct {
-	root               string
-	locks              *keyLocks
-	admissionMu        sync.Mutex
-	admissions         map[string]domain.TakeAdmissionClaim
-	nextAdmissionToken atomic.Uint64
+	root  string
+	locks *keyLocks
 }
 
 func New(root string) (*Repository, error) {
@@ -32,9 +28,8 @@ func New(root string) (*Repository, error) {
 		}
 	}
 	return &Repository{
-		root:       absolute,
-		locks:      newKeyLocks(),
-		admissions: make(map[string]domain.TakeAdmissionClaim),
+		root:  absolute,
+		locks: newKeyLocks(),
 	}, nil
 }
 
@@ -62,62 +57,37 @@ func (r *Repository) bundleDir(id string) string {
 	return filepath.Join(r.root, "conforms", "assets", id)
 }
 
-func (r *Repository) BeginTakeAdmission(id string) (domain.TakeAdmissionClaim, error) {
-	r.admissionMu.Lock()
-	defer r.admissionMu.Unlock()
-	if current, exists := r.admissions[id]; exists {
-		return domain.TakeAdmissionClaim{}, domain.NewError(
-			"take_admission_busy",
-			409,
-			"take %s is already being inspected since %s",
-			id,
-			current.StartedAt.Format(time.RFC3339Nano),
-		)
-	}
-	claim := domain.TakeAdmissionClaim{
-		TakeID:    id,
-		Token:     r.nextAdmissionToken.Add(1),
-		StartedAt: time.Now().UTC(),
-	}
-	r.admissions[id] = claim
-	return claim, nil
+// TakeAdmission is the exclusive right to inspect, probe, and commit one take
+// identifier. Concurrent admissions of the same identifier serialize here so a
+// later request observes the committed record and resolves as an idempotent
+// retry or a real conflict instead of being rejected as busy.
+type TakeAdmission struct {
+	lock *sync.Mutex
+	held bool
 }
 
-func (r *Repository) ReleaseTakeAdmission(id string) {
-	r.admissionMu.Lock()
-	defer r.admissionMu.Unlock()
-	delete(r.admissions, id)
+// BeginTakeAdmission waits for any in-flight admission of id to finish and then
+// acquires it. Callers must always release the returned admission, including on
+// every validation, probe, or conflict failure path.
+func (r *Repository) BeginTakeAdmission(id string) *TakeAdmission {
+	lock := r.locks.forKey("take-admission:" + id)
+	lock.Lock()
+	return &TakeAdmission{lock: lock, held: true}
 }
 
-func (r *Repository) CompleteTakeAdmission(claim domain.TakeAdmissionClaim) {
-	if claim.IsZero() {
+// Release ends the admission. It is safe to call more than once.
+func (admission *TakeAdmission) Release() {
+	if admission == nil || !admission.held {
 		return
 	}
-	r.admissionMu.Lock()
-	defer r.admissionMu.Unlock()
-	current, exists := r.admissions[claim.TakeID]
-	if exists && claim.Owns(current) {
-		delete(r.admissions, claim.TakeID)
-	}
+	admission.held = false
+	admission.lock.Unlock()
 }
 
-func (r *Repository) takeAdmission(id string) (domain.TakeAdmissionClaim, bool) {
-	r.admissionMu.Lock()
-	defer r.admissionMu.Unlock()
-	claim, exists := r.admissions[id]
-	return claim, exists
-}
-
+// GetTake reads the committed take record. Reads never consult admission state:
+// an in-flight admission stages its payloads under tmp/ and publishes the take
+// directory with one rename, so a reader either sees a complete record or none.
 func (r *Repository) GetTake(id string) (domain.MediaTake, error) {
-	if claim, active := r.takeAdmission(id); active {
-		return domain.MediaTake{}, domain.NewError(
-			"take_admission_busy",
-			409,
-			"take %s is not readable while admission %d is active",
-			id,
-			claim.Token,
-		)
-	}
 	return r.readTakeRecord(id)
 }
 

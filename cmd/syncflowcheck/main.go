@@ -168,6 +168,93 @@ func runAdmitCheck(ctx *checkContext) error {
 	if code := errorCode(body); code != "invalid_audio" {
 		return fmt.Errorf("malformed audio returned code %q", code)
 	}
+
+	// A failed probe must release the identifier: a later valid request for the
+	// same id admits normally instead of being blocked as busy.
+	response, body, err = ctx.requestJSON(
+		http.MethodPost,
+		"/v1/takes",
+		takePayload("bad-audio-01", "bad audio", ctx.audio, ctx.video),
+	)
+	if err != nil {
+		return err
+	}
+	if response.StatusCode != http.StatusCreated {
+		return fmt.Errorf("retry after failed probe returned %d: %s", response.StatusCode, body)
+	}
+
+	// A conflicting reuse must be rejected without shadowing the admitted take:
+	// reads and analyses still resolve to the committed record.
+	response, body, err = ctx.requestJSON(
+		http.MethodPost,
+		"/v1/takes",
+		takePayload("stable-take-01", "other camera", ctx.audio, ctx.video),
+	)
+	if err != nil {
+		return err
+	}
+	if response.StatusCode != http.StatusConflict {
+		return fmt.Errorf("conflicting reuse returned %d: %s", response.StatusCode, body)
+	}
+	if code := errorCode(body); code != "take_conflict" {
+		return fmt.Errorf("conflicting reuse returned code %q", code)
+	}
+	response, body, err = ctx.requestJSON(http.MethodGet, "/v1/takes/stable-take-01", nil)
+	if err != nil {
+		return err
+	}
+	if response.StatusCode != http.StatusOK {
+		return fmt.Errorf("take read after conflict returned %d: %s", response.StatusCode, body)
+	}
+	response, body, err = ctx.requestJSON(
+		http.MethodPost,
+		"/v1/takes/stable-take-01/sync-analyses",
+		map[string]any{
+			"analysis_id":    "admit-check-analysis-01",
+			"min_confidence": 0.55,
+			"max_offset_ms":  1000,
+		},
+	)
+	if err != nil {
+		return err
+	}
+	if response.StatusCode != http.StatusCreated {
+		return fmt.Errorf("analysis after conflict returned %d: %s", response.StatusCode, body)
+	}
+
+	// Concurrent identical replays must all succeed idempotently: one admission
+	// creates the take and the others observe the committed record.
+	replayStatuses := make([]int, 3)
+	var replayWait sync.WaitGroup
+	replayWait.Add(len(replayStatuses))
+	for index := range replayStatuses {
+		go func(index int) {
+			defer replayWait.Done()
+			response, _, err := ctx.requestJSON(
+				http.MethodPost,
+				"/v1/takes",
+				takePayload("replay-take-01", "replay take", ctx.audio, ctx.video),
+			)
+			if err != nil {
+				replayStatuses[index] = 0
+				return
+			}
+			replayStatuses[index] = response.StatusCode
+		}(index)
+	}
+	replayWait.Wait()
+	sort.Ints(replayStatuses)
+	if replayStatuses[0] != http.StatusOK || replayStatuses[len(replayStatuses)-1] != http.StatusCreated {
+		return fmt.Errorf("identical replays returned statuses %v", replayStatuses)
+	}
+	response, body, err = ctx.requestJSON(http.MethodGet, "/v1/takes/replay-take-01", nil)
+	if err != nil {
+		return err
+	}
+	if response.StatusCode != http.StatusOK {
+		return fmt.Errorf("read replay take returned %d: %s", response.StatusCode, body)
+	}
+
 	persisted, err := storage.New(ctx.root)
 	if err != nil {
 		return err

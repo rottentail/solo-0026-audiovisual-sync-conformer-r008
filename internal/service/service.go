@@ -26,11 +26,9 @@ func (s *Service) CreateTake(input domain.CreateTakeInput) (domain.TakeResult, e
 	if err := domain.ValidateCreateTake(input); err != nil {
 		return domain.TakeResult{}, err
 	}
-	claim, err := s.repository.BeginTakeAdmission(input.TakeID)
-	if err != nil {
-		s.repository.ReleaseTakeAdmission(input.TakeID)
-		return domain.TakeResult{}, err
-	}
+	admission := s.repository.BeginTakeAdmission(input.TakeID)
+	defer admission.Release()
+
 	audio, err := decodePayload("audio_base64", input.AudioBase64, domain.MaxAudioBytes)
 	if err != nil {
 		return domain.TakeResult{}, err
@@ -67,7 +65,6 @@ func (s *Service) CreateTake(input domain.CreateTakeInput) (domain.TakeResult, e
 	if err != nil {
 		return domain.TakeResult{}, err
 	}
-	s.repository.CompleteTakeAdmission(claim)
 	return domain.TakeResult{Take: admitted, Created: created}, nil
 }
 
